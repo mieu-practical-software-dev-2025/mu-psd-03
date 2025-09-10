@@ -1,7 +1,8 @@
 import os
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory,render_template
 from openai import OpenAI # Import the OpenAI library
 from dotenv import load_dotenv
+import requests
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -34,69 +35,36 @@ APP_NAME = os.getenv("YOUR_APP_NAME", "FlaskVueApp") # Default if not set
 @app.route('/')
 def index():
     return send_from_directory(app.static_folder, 'index.html')
+OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
     
 # URL:/send_api に対するメソッドを定義
-@app.route('/send_api', methods=['POST'])
-def send_api():
-    if not OPENROUTER_API_KEY:
-        app.logger.error("OpenRouter API key not configured.")
-        return jsonify({"error": "OpenRouter API key is not configured on the server."}), 500
+def query_openrouter(date_str):
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    prompt = f"{date_str}に起こった重要な出来事を日本語で教えてください。"
+    payload = {
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    response = requests.post(OPENROUTER_ENDPOINT, headers=headers, json=payload)
+    response.raise_for_status()
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
 
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
-        default_headers={ # Recommended by OpenRouter
-            "HTTP-Referer": SITE_URL,
-            "X-Title": APP_NAME,
-        }
-    )
-    
-    # POSTリクエストからJSONデータを取得
-    data = request.get_json()
-
-    # 'text'フィールドがリクエストのJSONボディに存在するか確認
-    if not data or 'text' not in data:
-        app.logger.error("Request JSON is missing or does not contain 'text' field.")
-        return jsonify({"error": "Missing 'text' in request body"}), 400
-
-    received_text = data['text']
-    if not received_text.strip(): # 空文字列や空白のみの文字列でないか確認
-        app.logger.error("Received text is empty or whitespace.")
-        return jsonify({"error": "Input text cannot be empty"}), 400
-    
-    # contextがあればsystemプロンプトに設定、なければデフォルト値
-    system_prompt = "140字以内で回答してください。" # デフォルトのシステムプロンプト
-    if 'context' in data and data['context'] and data['context'].strip():
-        system_prompt = data['context'].strip()
-        app.logger.info(f"Using custom system prompt from context: {system_prompt}")
-    else:
-        app.logger.info(f"Using default system prompt: {system_prompt}")
-
+@app.route('/events', methods=['GET'])
+def get_events():
+    date = request.args.get('date')
+    if not date:
+        return jsonify({"error": "dateパラメータが必要です"}), 400
     try:
-        # OpenRouter APIを呼び出し
-        # モデル名はOpenRouterで利用可能なモデルを指定してください。
-        # 例: "mistralai/mistral-7b-instruct", "google/gemini-pro", "openai/gpt-3.5-turbo"
-        # 詳細はOpenRouterのドキュメントを参照してください。
-        chat_completion = client.chat.completions.create(
-            messages=[ # type: ignore
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": received_text}
-            ], # type: ignore
-            model="google/gemma-3-27b-it:free", 
-        )
-        
-        # APIからのレスポンスを取得
-        if chat_completion.choices and chat_completion.choices[0].message:
-            processed_text = chat_completion.choices[0].message.content
-        else:
-            processed_text = "AIから有効な応答がありませんでした。"
-            
-        return jsonify({"message": "AIによってデータが処理されました。", "processed_text": processed_text})
-
+        events = query_openrouter(date)
+        return jsonify({"events": events})
     except Exception as e:
-        app.logger.error(f"OpenRouter API call failed: {e}")
-        # クライアントには具体的なエラー詳細を返しすぎないように注意
-        return jsonify({"error": f"AIサービスとの通信中にエラーが発生しました。"}), 500
+        return jsonify({"error": str(e)}), 500
+    
+
 
 # スクリプトが直接実行された場合にのみ開発サーバーを起動
 if __name__ == '__main__':
